@@ -1,0 +1,13 @@
+# Todos los .md excepto README (pedido explícito). docs/ queda fuera de git.
+*.md
+!README.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+.python-version
+
+# Reporte final (se genera aparte)
+docs/reporte.pdf
