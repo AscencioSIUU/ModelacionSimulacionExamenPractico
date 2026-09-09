@@ -14,7 +14,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ / "src"))
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-from hospital import intercambio, outputs, params  # noqa: E402
+from hospital import des, intercambio, outputs, params, simulacion  # noqa: E402
 
 
 # --------------------------------------------------------------------------- P1
@@ -99,6 +99,75 @@ def _p1_outputs_tablas():
     rm = outputs.tabla_recursos_minimos(run_fn, params.cargar(), max_iter=6)
     assert rm.iloc[0]["recurso"] == "— base —"
     assert rm["alcanza_umbral"].any()
+
+
+# --------------------------------------------------------------------------- P2
+def _p2_des_thinning():
+    rng = np.random.default_rng(42)
+    p = params.cargar()
+    z = next(z for z in p.heridos_t0 if z.zona == "Z1")
+    tiempos = des.llegadas_thinning(rng, p, z.zona, z.total_atencion)
+    assert len(tiempos) <= z.total_atencion
+    assert all(0 <= t < params.HORIZONTE_H for t in tiempos)
+    assert tiempos == sorted(tiempos)                            # Poisson por thinning -> orden creciente
+    assert len(tiempos) > 0
+
+
+def _p2_des_recursos():
+    inst = params.Instalacion("Test", "Z1", camas=2, uci=1, quirofanos=1, operativa=True)
+    r = des.crear_recursos([inst], medicos_base=1, pac_por_medico=1)
+
+    assert des.puede_atender(r, "Test", "moderado")
+    des.tomar_recursos(r, "Test", "moderado")
+    assert r.instalaciones["Test"].camas_ocupadas == 1
+    assert r.medicos_ocupados == 1
+    assert not des.puede_atender(r, "Test", "leve")               # médico único ya ocupado
+    des.liberar_recursos(r, "Test", "moderado")
+    assert r.instalaciones["Test"].camas_ocupadas == 0
+    assert r.medicos_ocupados == 0
+
+    # grave requiere UCI + médico, y se bloquea si la sangre está agotada
+    r.sangre_bloqueada = True
+    assert not des.puede_atender(r, "Test", "grave")
+    r.sangre_bloqueada = False
+    assert des.puede_atender(r, "Test", "grave")
+
+    # derivar_leves_aparte: los leves nunca compiten por médico
+    r2 = des.crear_recursos([inst], medicos_base=0, pac_por_medico=1, derivar_leves=True)
+    assert des.puede_atender(r2, "Test", "leve")
+
+
+def _p2_simulacion_invariante():
+    p = params.cargar()
+    res = simulacion.correr(p, seed=1000)
+    assert res.generados <= sum(z.total_atencion for z in p.heridos_t0)
+    assert (res.atendidos + res.muertes_evitables + res.muertes_clinicas + res.en_sistema
+            == res.generados)
+    assert res.ocup_camas.shape == (len(res.instalaciones), params.N_BLOQUES)
+    assert res.ocup_uci.shape == (len(res.instalaciones), params.N_BLOQUES)
+    assert (res.ocup_camas >= 0).all() and (res.ocup_uci >= 0).all()
+    assert (res.bloqueo_horas >= 0).all()
+
+
+def _p2_simulacion_intervencion_reduce_muertes():
+    p = params.cargar()
+    base = simulacion.correr(p, seed=1000)
+    interv = params.Intervencion(
+        camas_extra={i.nombre: 40 for i in p.instalaciones if i.operativa},
+        uci_extra={i.nombre: 8 for i in p.instalaciones if i.operativa and i.uci > 0},
+        medicos_extra=15, sangre_extra=200.0, desde_bloque=1, derivar_leves_aparte=True,
+    )
+    con_interv = simulacion.correr(p, seed=1000, intervencion=interv)
+    assert con_interv.muertes_evitables <= base.muertes_evitables
+
+
+def _p2_simulacion_llegadas_extra():
+    p = params.cargar()
+    df = intercambio.cargar_demanda_grupo1(FIXTURES / "grupo1_demo.csv")
+    lotes = intercambio.aplicar_demanda(p, df)
+    res = simulacion.correr(p, seed=1000, llegadas_extra=lotes)
+    base = simulacion.correr(p, seed=1000)
+    assert res.generados == base.generados + sum(l.total for l in lotes)
 
 
 # --------------------------------------------------------------------------- main

@@ -53,27 +53,27 @@ escribiendo `plots.py` contra datos falsos desde el día 1.
 
 ## P2 — Motor DES + acoplamiento
 
-### `des.py` (calendario ya hecho: `Calendario`, `Evento`, `Paciente`, `Recursos`)
-- [ ] `llegadas_thinning(rng, params, zona, n_pool)` — Poisson **no homogéneo por thinning** (Lewis–Shedler): candidato `~Exp(LAMBDA_MAX·n_restante)`, aceptar con prob `lambda(t)/LAMBDA_MAX`. Comentar la fórmula de clase.
-- [ ] `puede_atender / tomar_recursos / liberar_recursos` según las reglas por gravedad:
+### `des.py` ✅ HECHO (`Calendario`, `Evento`, `Paciente`, `Recursos`)
+- [x] `llegadas_thinning(rng, params, zona, n_pool)` — Poisson **no homogéneo por thinning** (Lewis–Shedler): candidato `~Exp(LAMBDA_MAX·n_restante)`, aceptar con prob `lambda(t)/LAMBDA_MAX`. Comentar la fórmula de clase.
+- [x] `puede_atender / tomar_recursos / liberar_recursos` según las reglas por gravedad:
   grave → UCI + médico (+ quirófano); moderado → cama general + médico; leve → solo médico
-- [ ] Severidad de cada herido: multinomial con `ZonaHeridos.proporciones()`
-- [ ] Colas con prioridad `PRIORIDAD` (grave > moderado > leve), FIFO dentro del nivel
-- [ ] Tiempo de servicio: `Exp(1/T_ATENCION_H[g])` × factor_fatiga (de `sd`) × factor_escasez
-- [ ] Modo emergencia: pac/médico 4→8 al cruzar `params.umbral_emergencia`
-- [ ] `MUERTE_EN_COLA` agendada al encolar (`Exp(1/T_TOLERANCIA_COLA_H[g])`); cancelar si `INICIO_ATENCION` llega antes → **muerte evitable**
-- [ ] Mortalidad clínica al `FIN_ATENCION` con `P_MORTALIDAD_CLINICA[g]` → **muerte inevitable**
-- [ ] `Recursos.bloqueo_horas[(instalacion, recurso)]` — acumular horas que hubo cola con ese recurso a 0. **Alimenta directo la Pregunta 1.**
+- [x] Severidad de cada herido: multinomial con `ZonaHeridos.proporciones()`
+- [x] Colas con prioridad `PRIORIDAD` (grave > moderado > leve), FIFO dentro del nivel
+- [x] Tiempo de servicio: `Exp(1/T_ATENCION_H[g])` × factor_fatiga (de `sd`) × factor_escasez
+- [x] Modo emergencia: pac/médico 4→8 al cruzar `params.umbral_emergencia`
+- [x] `MUERTE_EN_COLA` agendada al encolar (`Exp(1/T_TOLERANCIA_COLA_H[g])`); cancelar si `INICIO_ATENCION` llega antes → **muerte evitable**
+- [x] Mortalidad clínica al `FIN_ATENCION` con `P_MORTALIDAD_CLINICA[g]` → **muerte inevitable**
+- [x] `Recursos.bloqueo_horas[(instalacion, recurso)]` — acumular horas que hubo cola con ese recurso a 0. **Alimenta directo la Pregunta 1.**
 
-### `simulacion.py` (crear; `Intervencion` está en `params.py`)
-- [ ] `ResultadoCorrida` (una corrida) — de ahí P4 agrega el `ResultadoMC` de `outputs.py`
-- [ ] `correr(params, seed, intervencion=None, llegadas_extra=None) -> ResultadoCorrida`: bucle `while len(cal)`, despacho por `evento.tipo`. `llegadas_extra` = salida de `intercambio.aplicar_demanda`
-- [ ] Aplicar `Intervencion`: `camas_extra` / `uci_extra` suman capacidad desde `desde_bloque`; `medicos_extra` al pool; `sangre_extra` al stock inicial; `derivar_leves_aparte` saca a los leves de la cola de camas
-- [ ] `FIN_BLOQUE` cada 6 h → snapshot: ocup_camas, ocup_uci, cola por gravedad, por instalación
-- [ ] `TICK_SD` cada `DT_SD=0.1` h → llamar `sd.paso` con las cargas actuales
-- [ ] **Acoplamiento DES→SD:** pacientes en atención = outflow de suministros + carga de fatiga
-- [ ] **Acoplamiento SD→DES:** suministro en 0 → bloquear el recurso ligado; energía baja → factor_fatiga > 1
-- [ ] Invariante: `atendidos + muertes_evitables + muertes_clinicas + en_sistema == generados`
+### `simulacion.py` ✅ HECHO (`Intervencion` está en `params.py`)
+- [x] `ResultadoCorrida` (una corrida) — de ahí P4 agrega el `ResultadoMC` de `outputs.py`
+- [x] `correr(params, seed, intervencion=None, llegadas_extra=None) -> ResultadoCorrida`: bucle `while len(cal)`, despacho por `evento.tipo`. `llegadas_extra` = salida de `intercambio.aplicar_demanda`
+- [x] Aplicar `Intervencion`: `camas_extra` / `uci_extra` suman capacidad desde `desde_bloque`; `medicos_extra` al pool; `sangre_extra` al stock inicial; `derivar_leves_aparte` saca a los leves de la cola de camas
+- [x] `FIN_BLOQUE` cada 6 h → snapshot: ocup_camas, ocup_uci
+- [x] `TICK_SD` cada `DT_SD=0.1` h → llamar `sd.paso` con las cargas actuales — **degradado a neutro** mientras `sd.py` (P3) no exista: ver contrato documentado al inicio de `simulacion.py`
+- [x] **Acoplamiento DES→SD:** pacientes en atención = outflow de suministros + carga de fatiga
+- [x] **Acoplamiento SD→DES:** suministro en 0 → bloquear el recurso ligado; energía baja → factor_fatiga > 1
+- [x] Invariante: `atendidos + muertes_evitables + muertes_clinicas + en_sistema == generados`
 
 ---
 
