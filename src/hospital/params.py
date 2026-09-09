@@ -207,6 +207,21 @@ class ParamsSistema:
         return next(i for i in self.instalaciones if i.nombre == nombre)
 
 
+@dataclass(frozen=True)
+class Intervencion:
+    """
+    Palanca de política que se aplica a una corrida. `None` = escenario sin
+    intervención. Objeto de configuración -> vive con los parámetros.
+    La consumen simulacion.correr (P2) y outputs.tabla_recursos_minimos (P1).
+    """
+    camas_extra: dict = field(default_factory=dict)          # nombre_instalacion -> +camas
+    uci_extra: dict = field(default_factory=dict)            # nombre_instalacion -> +camas UCI
+    medicos_extra: int = 0                                    # médicos adicionales a repartir
+    sangre_extra: float = 0.0                                 # unidades añadidas al stock inicial
+    desde_bloque: int = 1                                     # bloque en que entra en vigor (1..12)
+    derivar_leves_aparte: bool = False                        # triaje de leves fuera del hospital
+
+
 def cargar() -> ParamsSistema:
     return ParamsSistema()
 

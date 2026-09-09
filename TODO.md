@@ -27,24 +27,27 @@ escribiendo `plots.py` contra datos falsos desde el día 1.
 ## P1 — Datos, intercambio, salidas
 
 ### `params.py` ✅ HECHO
-- [x] Dataclasses `Instalacion`, `ZonaHeridos`, `Suministro`, `ParamsSistema`
+- [x] Dataclasses `Instalacion`, `ZonaHeridos`, `Suministro`, `ParamsSistema`, `Intervencion`
 - [x] Valores del Excel transcritos, tasas normalizadas a **base horaria** (`/24`)
 - [x] `matriz_ruteo()` — Z3 cerrada reparte a Z1/Z4; supuestos documentados en docstring
 - [x] `coef_consumo()` — reparte consumo/día por gravedad → unidades por paciente-hora
 - [x] `volcar_json()` → `data/processed/parametros.json`
+- [x] `Intervencion` (config de política: `camas_extra`, `uci_extra`, `medicos_extra`, `sangre_extra`, `desde_bloque`, `derivar_leves_aparte`) — vive aquí, no en `simulacion.py`
 - [ ] **Revisar** los supuestos de `matriz_ruteo` y `PESO_CONSUMO_GRAVEDAD` con el equipo y anotarlos en `docs/` para el reporte
 
-### `intercambio.py`
-- [ ] `cargar_demanda_grupo1(path)` → `DataFrame | None` (ya stubbeado; validar columnas `COLS`)
-- [ ] `aplicar_demanda(params, demanda)` → estructura de llegadas adicionales por `(zona, bloque)` que `simulacion.correr` inyecta
-- [ ] Test: con el fixture `tests/fixtures/grupo1_demo.csv` devuelve 3 filas; con el CSV real vacío devuelve `None` sin reventar
-- [ ] **Bloqueado** el número final de muertes evitables hasta el intercambio presencial — dejar el código listo para solo cambiar el CSV
+### `intercambio.py` ✅ HECHO
+- [x] `cargar_demanda_grupo1(path)` → `DataFrame | None` (valida columnas, zonas, rango de bloque, negativos)
+- [x] `aplicar_demanda(params, demanda)` → `list[LlegadaExtra]` (zona, `t` en horas, conteos) ordenada por tiempo — `simulacion.correr` (P2) inyecta cada lote en el pool de la zona en `t = (bloque−1)·6`
+- [x] `resumen_impacto(params, demanda)` → DataFrame de incremento de pool por zona (para 4 del reporte)
+- [x] Test `_p1_intercambio_*`: fixture de 3 filas; CSV vacío / ausente → `None` sin reventar
+- [x] Código listo: el día del intercambio solo se pega el CSV real, cero cambios
 
-### `outputs.py`
-- [ ] `tabla_saturacion(res_mc)` → `outputs/tables/saturacion_por_bloque.csv`: % ocupación de camas por instalación × bloque (media + IC95). **Es el output (a) para el Grupo 7.**
-- [ ] `tabla_cuellos_botella(res_mc)` → ranking de horas-recurso bloqueadas por tipo (cama UCI / cama general / médico / suministro). **Output (b) para el Grupo 7:** los 2 primeros de la lista.
-- [ ] `tabla_recursos_minimos(res_mc)` → barrido sobre +camas / +médicos / +sangre hasta que la mortalidad evitable baje de 15 %. **Output (c) para el Grupo 7.**
-- [ ] Las 3 funciones escriben CSV y devuelven el DataFrame (para el notebook)
+### `outputs.py` ✅ HECHO
+- [x] `ResultadoMC` — **contrato de lo que P4 debe devolver** (arrays `ocup_camas`, `ocup_uci`, `bloqueo_horas`, `muertes_*`, `generados`)
+- [x] `tabla_saturacion(res)` → `outputs/tables/saturacion_por_bloque.csv` (% ocupación camas/UCI por instalación × bloque, media + IC95 por percentiles). **Output (a) Grupo 7.**
+- [x] `tabla_cuellos_botella(res, top=2)` → ranking de horas-recurso bloqueadas, columna `critico` para los 2 primeros. **Output (b) Grupo 7.**
+- [x] `tabla_recursos_minimos(run_fn, params)` → barrido +camas / +camas UCI / +médicos / +sangre hasta tasa evitable < 15 % (`run_fn(interv)` inyectado por P4). **Output (c) Grupo 7.**
+- [x] Las 3 escriben CSV y devuelven DataFrame. Test `_p1_outputs_tablas` con `ResultadoMC` falso.
 
 ---
 
@@ -62,13 +65,14 @@ escribiendo `plots.py` contra datos falsos desde el día 1.
 - [ ] Mortalidad clínica al `FIN_ATENCION` con `P_MORTALIDAD_CLINICA[g]` → **muerte inevitable**
 - [ ] `Recursos.bloqueo_horas[(instalacion, recurso)]` — acumular horas que hubo cola con ese recurso a 0. **Alimenta directo la Pregunta 1.**
 
-### `simulacion.py` (dataclasses `Intervencion`, `ResultadoCorrida` ya hechas)
-- [ ] `correr(params, seed, intervencion=None) -> ResultadoCorrida`: bucle `while len(cal)`, despacho por `evento.tipo`
+### `simulacion.py` (crear; `Intervencion` está en `params.py`)
+- [ ] `ResultadoCorrida` (una corrida) — de ahí P4 agrega el `ResultadoMC` de `outputs.py`
+- [ ] `correr(params, seed, intervencion=None, llegadas_extra=None) -> ResultadoCorrida`: bucle `while len(cal)`, despacho por `evento.tipo`. `llegadas_extra` = salida de `intercambio.aplicar_demanda`
+- [ ] Aplicar `Intervencion`: `camas_extra` / `uci_extra` suman capacidad desde `desde_bloque`; `medicos_extra` al pool; `sangre_extra` al stock inicial; `derivar_leves_aparte` saca a los leves de la cola de camas
 - [ ] `FIN_BLOQUE` cada 6 h → snapshot: ocup_camas, ocup_uci, cola por gravedad, por instalación
 - [ ] `TICK_SD` cada `DT_SD=0.1` h → llamar `sd.paso` con las cargas actuales
 - [ ] **Acoplamiento DES→SD:** pacientes en atención = outflow de suministros + carga de fatiga
 - [ ] **Acoplamiento SD→DES:** suministro en 0 → bloquear el recurso ligado; energía baja → factor_fatiga > 1
-- [ ] Aplicar `Intervencion` (camas extra desde `desde_bloque`, médicos reasignados, derivar leves)
 - [ ] Invariante: `atendidos + muertes_evitables + muertes_clinicas + en_sistema == generados`
 
 ---
@@ -90,7 +94,7 @@ escribiendo `plots.py` contra datos falsos desde el día 1.
 ## P4 — Monte Carlo, gráficas, notebook
 
 ### `montecarlo.py`
-- [ ] `correr_replicas(params, n=30, intervencion=None)` — seeds `np.random.default_rng(1000+r)`, llama `simulacion.correr`
+- [ ] `correr_replicas(params, n=30, intervencion=None) -> outputs.ResultadoMC` — seeds `np.random.default_rng(1000+r)`, llama `simulacion.correr` y apila los resultados en los arrays `[r, i, b]` que define `outputs.ResultadoMC` (P1 ya consume ese contrato)
 - [ ] Perturbaciones por réplica: heridos iniciales (±%), multiplicador de `lambda`, multiplicador de tiempos de servicio, presentismo del personal (~85 %), tasas de mortalidad
 - [ ] Agregación: media + **IC 95 % por percentiles 2.5 / 97.5** (los tiempos de colapso son sesgados, no usar ±1.96σ)
 - [ ] `bloque_de_colapso(res_mc)` por instalación = primer bloque con ocupación ≈100 % y cola creciente sostenida → **respuesta Pregunta 1**
