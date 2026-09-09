@@ -1,24 +1,10 @@
 """
-T1 (P1) — Incorporación del intercambio presencial (Grupo 1 -> Grupo 2).
+Incorporación del intercambio (Grupo 1 -> Grupo 2).
 
 El Grupo 1 entrega la proyección de desplazados que requieren atención médica por
-zona y bloque de tiempo. Llega el día del intercambio: hasta entonces
-`data/intercambio/grupo1_demanda.csv` está VACÍO y `cargar_demanda_grupo1`
-devuelve None -> el escenario B (con demanda real) simplemente se salta.
-
-Formato esperado del CSV (una fila por zona × bloque):
-    zona,bloque,heridos_leves,heridos_moderados,heridos_graves
-    Z1,1,180,60,25
-    Z1,2,120,40,15
-    ...
-
-Cómo altera los supuestos del modelo propio (documentar en el reporte):
-  - Modelo base (pre-intercambio): todos los heridos existen en T0 y llegan al
-    hospital según la curva de tasa (18%/h, 7%/h, 2%/h) sobre ese pool fijo.
-  - Con Grupo 1: aparecen heridos NUEVOS en bloques posteriores (desplazados que
-    se lesionan o que recién acceden a atención). Se inyectan como llegadas
-    adicionales al inicio del bloque correspondiente -> adelantan la saturación.
+zona y bloque de tiempo.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -77,13 +63,12 @@ class LlegadaExtra:
 def aplicar_demanda(params: ParamsSistema, demanda: pd.DataFrame) -> list[LlegadaExtra]:
     """
     Traduce la tabla del Grupo 1 en lotes de llegadas adicionales ordenados por
-    tiempo. `simulacion.correr` (P2) los inyecta en el pool de la zona al inicio
-    del bloque indicado: el bloque `b` empieza en la hora `(b - 1) * BLOQUE_H`.
+    tiempo.
 
     `params` se recibe para futuras reglas dependientes de la zona (p. ej. tope
-    por capacidad de ruteo); hoy la traducción es directa.
+    por capacidad de ruteo).
     """
-    _ = params  # reservado para reglas por zona; la traducción actual no lo necesita
+    _ = params  # reservado para reglas por zona
     lotes: list[LlegadaExtra] = []
     for r in demanda.itertuples(index=False):
         t = (int(r.bloque) - 1) * BLOQUE_H
@@ -102,7 +87,6 @@ def aplicar_demanda(params: ParamsSistema, demanda: pd.DataFrame) -> list[Llegad
 def resumen_impacto(params: ParamsSistema, demanda: pd.DataFrame) -> pd.DataFrame:
     """
     Cuánto crece el pool de heridos por zona respecto al escenario base.
-    Alimenta la sección 4 del reporte ("qué cambió con el intercambio").
     """
     base = {z.zona: {g: getattr(z, g) for g in GRAVEDADES} for z in params.heridos_t0}
     filas = []

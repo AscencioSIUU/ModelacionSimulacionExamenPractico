@@ -1,18 +1,17 @@
 """
-T1 (P1) — Tablas que el Grupo 2 entrega al Grupo 7.
+Tablas que el Grupo 2 entrega al Grupo 7.
 
-Excel 6 — OUTPUT REQUERIDO:
+OUTPUT REQUERIDO:
   a) Saturación hospitalaria: % ocupación de camas por instalación en cada bloque de 6 h.
-  b) Los dos cuellos de botella críticos (qué recurso/instalación falla primero y cuándo).
+  b) Los dos cuellos de botella críticos (qué recurso o instalación falla primero).
   c) Recursos médicos adicionales mínimos para mantener la mortalidad evitable < 15 %.
 
-Contrato de entrada — `ResultadoMC`
------------------------------------
-Es lo que `montecarlo.correr_replicas` (P4) debe devolver. P1 lo define aquí
-porque P1 es el consumidor; P4 sólo tiene que rellenar estos arrays.
+Aquí vive también `ResultadoMC`, el contrato de salida agregada que produce
+`montecarlo.correr_replicas` y que consumen estas tablas y `plots.py`.
 
-Todas las funciones escriben su CSV en `outputs/tables/` y devuelven el DataFrame.
+Las tres funciones escriben su CSV en `outputs/tables/` y devuelven el DataFrame.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -26,20 +25,32 @@ from .params import Intervencion, ParamsSistema
 
 DIR_TABLAS = Path(__file__).resolve().parents[2] / "outputs" / "tables"
 
+# Valor crítico de la t de Student a dos colas al 95 %, por grados de libertad.
+_T975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+         8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145,
+         15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086,
+         21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056,
+         27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042, 35: 2.030, 40: 2.021}
+
 
 @dataclass
 class ResultadoMC:
     """Salida agregada de las N réplicas. Ejes: r = réplica, i = instalación, b = bloque."""
+
     n_replicas: int
     instalaciones: list[str]
     n_bloques: int
-    recursos: list[str]                    # p. ej. ["cama_general", "cama_uci", "medico", "sangre", ...]
-    ocup_camas: np.ndarray                 # [r, i, b]  fracción 0..1 de camas generales ocupadas
-    ocup_uci: np.ndarray                   # [r, i, b]  fracción 0..1 de camas UCI ocupadas
-    bloqueo_horas: np.ndarray             # [r, i, recurso]  horas con cola y ese recurso agotado
-    muertes_evitables: np.ndarray         # [r]
-    muertes_clinicas: np.ndarray          # [r]
-    generados: np.ndarray                 # [r]
+    recursos: list[str]                    # servibles + suministros
+    ocup_camas: np.ndarray                 # [r, i, b]  fracción 0..1 de camas generales
+    ocup_uci: np.ndarray                   # [r, i, b]
+    ocup_quirofanos: np.ndarray            # [r, i, b]
+    bloqueo_horas: np.ndarray              # [r, i, recurso]  horas con cola y recurso agotado
+    muertes_evitables: np.ndarray          # [r]
+    muertes_clinicas: np.ndarray           # [r]
+    generados: np.ndarray                  # [r]
+    patient_log: pd.DataFrame = field(default_factory=pd.DataFrame)
+    state_log: pd.DataFrame = field(default_factory=pd.DataFrame)
+    stock_log: pd.DataFrame = field(default_factory=pd.DataFrame)
     metadatos: dict = field(default_factory=dict)
 
     @property
@@ -48,13 +59,32 @@ class ResultadoMC:
         return self.muertes_evitables / np.maximum(self.generados, 1)
 
 
-# --- helpers ------------------------------------------------------------------
-def _ic95(x: np.ndarray, axis: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Media e IC 95 % por PERCENTILES (2.5 / 97.5) — los colapsos son sesgados."""
+def _t_critico(gl: int) -> float:
+    """t de Student al 97.5 % con `gl` grados de libertad; 1.96 para gl grandes."""
+    if gl <= 0:
+        return float("nan")
+    if gl in _T975:
+        return _T975[gl]
+    if gl > 40:
+        return 1.96
+    return _T975[max(k for k in _T975 if k <= gl)]
+
+
+def ic95(x: np.ndarray, axis: int = 0, metodo: str = "t"
+         ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Media e intervalo de confianza al 95 % entre réplicas."""
+    x = np.asarray(x, dtype=float)
     media = np.mean(x, axis=axis)
-    lo = np.percentile(x, 2.5, axis=axis)
-    hi = np.percentile(x, 97.5, axis=axis)
-    return media, lo, hi
+    if metodo == "percentil":
+        return media, np.percentile(x, 2.5, axis=axis), np.percentile(x, 97.5, axis=axis)
+    if metodo != "t":
+        raise ValueError("metodo debe ser 't' o 'percentil'")
+    n = x.shape[axis]
+    if n < 2:
+        nan = np.full_like(media, np.nan, dtype=float)
+        return media, nan, nan
+    semiancho = _t_critico(n - 1) * np.std(x, axis=axis, ddof=1) / np.sqrt(n)
+    return media, media - semiancho, media + semiancho
 
 
 def _guardar(df: pd.DataFrame, nombre: str) -> Path:
@@ -64,12 +94,12 @@ def _guardar(df: pd.DataFrame, nombre: str) -> Path:
     return p
 
 
-# --- (a) saturación hospitalaria --------------------------------------------
-def tabla_saturacion(res: ResultadoMC) -> pd.DataFrame:
+# --- (a) saturación hospitalaria ----------------------------------------------
+def tabla_saturacion(res: ResultadoMC, metodo_ic: str = "t") -> pd.DataFrame:
     """% de ocupación de camas por instalación × bloque, media + IC 95 %."""
     filas = []
     for tipo, arr in (("general", res.ocup_camas), ("uci", res.ocup_uci)):
-        media, lo, hi = _ic95(arr, axis=0)               # -> [i, b]
+        media, lo, hi = ic95(arr, axis=0, metodo=metodo_ic)       # -> [i, b]
         for i, inst in enumerate(res.instalaciones):
             for b in range(res.n_bloques):
                 filas.append({
@@ -79,19 +109,21 @@ def tabla_saturacion(res: ResultadoMC) -> pd.DataFrame:
                     "ocupacion_media_pct": round(100 * media[i, b], 1),
                     "ic95_bajo_pct": round(100 * lo[i, b], 1),
                     "ic95_alto_pct": round(100 * hi[i, b], 1),
+                    "metodo_ic": metodo_ic,
                 })
     df = pd.DataFrame(filas)
     _guardar(df, "saturacion_por_bloque.csv")
     return df
 
 
-# --- (b) cuellos de botella --------------------------------------------------
-def tabla_cuellos_botella(res: ResultadoMC, top: int = 2) -> pd.DataFrame:
+# --- (b) cuellos de botella ----------------------------------------------------
+def tabla_cuellos_botella(res: ResultadoMC, top: int = 2, metodo_ic: str = "t",
+                          guardar: bool = True) -> pd.DataFrame:
     """
-    Ranking de (instalación, recurso) por horas-recurso bloqueadas (media de las
-    réplicas). Los `top` primeros son el entregable (b) para el Grupo 7.
+    Ranking de (instalación, recurso) por horas-recurso bloqueadas, promediadas
+    entre réplicas.
     """
-    media, lo, hi = _ic95(res.bloqueo_horas, axis=0)      # -> [i, recurso]
+    media, lo, hi = ic95(res.bloqueo_horas, axis=0, metodo=metodo_ic)   # -> [i, recurso]
     filas = []
     for i, inst in enumerate(res.instalaciones):
         for k, rec in enumerate(res.recursos):
@@ -101,24 +133,29 @@ def tabla_cuellos_botella(res: ResultadoMC, top: int = 2) -> pd.DataFrame:
                 "horas_bloqueadas_media": round(float(media[i, k]), 1),
                 "ic95_bajo": round(float(lo[i, k]), 1),
                 "ic95_alto": round(float(hi[i, k]), 1),
+                "metodo_ic": metodo_ic,
             })
     df = pd.DataFrame(filas).sort_values("horas_bloqueadas_media", ascending=False)
     df = df.reset_index(drop=True)
     df.insert(0, "rank", df.index + 1)
     df["critico"] = df["rank"] <= top
-    _guardar(df, "cuellos_botella.csv")
+    if guardar:
+        _guardar(df, "cuellos_botella.csv")
     return df
 
 
-# --- (c) recursos adicionales mínimos --------------------------------------
+# --- (c) recursos adicionales mínimos ------------------------------------------
 _PALANCAS: dict[str, tuple[str, float, Callable[[float, ParamsSistema], Intervencion]]] = {
     # nombre -> (unidad, paso por iteración, constructor de Intervencion)
-    "camas_generales": ("camas", 20, lambda n, p: Intervencion(
+    "camas_generales": ("camas", 40, lambda n, p: Intervencion(
         camas_extra={i.nombre: int(n) for i in p.instalaciones if i.operativa})),
-    "camas_uci": ("camas UCI", 4, lambda n, p: Intervencion(
+    "camas_uci": ("camas UCI", 8, lambda n, p: Intervencion(
         uci_extra={i.nombre: int(n) for i in p.instalaciones if i.operativa and i.uci > 0})),
-    "medicos": ("médicos", 10, lambda n, p: Intervencion(medicos_extra=int(n))),
-    "sangre": ("unidades", 100, lambda n, p: Intervencion(sangre_extra=float(n))),
+    "quirofanos": ("quirófanos", 4, lambda n, p: Intervencion(
+        quirofanos_extra={i.nombre: int(n) for i in p.instalaciones
+                          if i.operativa and i.quirofanos > 0})),
+    "medicos": ("médicos", 20, lambda n, p: Intervencion(medicos_extra=int(n))),
+    "sangre": ("unidades", 300, lambda n, p: Intervencion(sangre_extra=float(n))),
 }
 
 
@@ -127,14 +164,12 @@ def tabla_recursos_minimos(
     params: ParamsSistema,
     *,
     umbral: float = 0.15,
-    max_iter: int = 8,
+    max_iter: int = 4,
 ) -> pd.DataFrame:
     """
-    Para cada palanca (camas / camas UCI / médicos / sangre), incrementa en pasos
-    fijos y vuelve a correr Monte Carlo (`run_fn`) hasta que la tasa media de
-    mortalidad evitable baje del `umbral`. Reporta la cantidad mínima hallada.
-
-    `run_fn(None)` debe devolver el escenario base.
+    Para cada palanca incrementa la dotación en pasos fijos y vuelve a correr
+    Monte Carlo (`run_fn`) hasta que la tasa media de mortalidad evitable baje
+    del `umbral`. Reporta la cantidad mínima hallada.
     """
     base = run_fn(None)
     tasa_base = float(np.mean(base.tasa_evitable))

@@ -1,9 +1,20 @@
-"""Sustrato de Dinámica de Sistemas: suministros y energía del personal.
-
-El estado satisface una EDO de primer orden ``dx/dt = f(t, x)``. En este
-modelo, ``x`` reúne los stocks agregados y la energía de cada instalación;
-las cargas que entrega el DES se consideran constantes durante cada tick SD.
 """
+Dinámica de Sistemas: suministros y energía del personal.
+
+El estado reúne los stocks de suministros y la energía de cada instalación. Su
+parte continua satisface una EDO de primer orden que se integra por Euler explícito
+con Δt = 0.25 h; las cargas que entrega el DES se consideran constantes durante
+cada tick.
+
+Los suministros se mueven por dos vías distintas:
+
+- Impulso discreto (R5). El DES descuenta una cantidad fija por procedimiento
+  y la acumula en un buffer. ``paso`` lo resta de golpe, antes de integrar y sin
+  integrarlo.
+- Flujo continuo. Solo el combustible (consumo por instalación operativa) y
+  el reabastecimiento externo, que en el escenario base vale 0.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,7 +22,7 @@ from typing import Callable
 
 import numpy as np
 
-from .params import EPS_STOCK, ParamsSistema
+from .params import EPS_STOCK, TOL_STOCK, ParamsSistema
 
 
 @dataclass
@@ -69,8 +80,7 @@ def _desde_vector(vector: np.ndarray, layout: _LayoutSD, *, acotar: bool) -> Est
     stocks = vector[:n_stocks]
     energia = vector[n_stocks:]
     if acotar:
-        # La EDO saturante frena el consumo en cero; esta proyección mínima
-        # corrige el sobrepaso numérico que un paso finito aún puede producir.
+        # Proyección mínima: corrige el sobrepaso numérico de un paso finito.
         stocks = np.maximum(stocks, 0.0)
         energia = np.clip(energia, 0.0, 1.0)
     return EstadoSD(
@@ -97,38 +107,38 @@ def derivadas(
     cargas: dict[str, dict[str, int | float]],
     params: ParamsSistema,
 ) -> EstadoSD:
-    """Evalúa las derivadas de stocks y energía para las cargas del DES."""
+    """
+    Parte continua de la EDO. Los cinco suministros que se consumen por
+    procedimiento tienen derivada 0 salvo reabastecimiento.
+
+        dS_k/dt = r_k − [k es combustible] · c · n_operativas · S_k/(S_k+EPS)
+        dE_f/dt = −alfa · carga_f/cap_f + beta · (1 − E_f)
+    """
     layout = _layout(params)
     _a_vector(estado, layout)  # valida claves y finitud antes de operar
 
-    carga_total_gravedad: dict[str, float] = {}
-    for cargas_inst in cargas.values():
-        for gravedad, cantidad in cargas_inst.items():
-            cantidad = float(cantidad)
-            if not np.isfinite(cantidad) or cantidad < 0:
-                raise ValueError("Las cargas deben ser finitas y no negativas")
-            carga_total_gravedad[gravedad] = carga_total_gravedad.get(gravedad, 0.0) + cantidad
-
+    n_operativas = sum(1 for i in params.instalaciones if i.operativa)
     d_stocks: dict[str, float] = {}
     for suministro in layout.suministros:
         stock = max(0.0, float(estado.stocks[suministro]))
-        consumo = sum(
-            float(coef) * carga_total_gravedad.get(gravedad, 0.0)
-            for gravedad, coef in params.coef_consumo.get(suministro, {}).items()
-        )
-        # S/(S+eps) hace que el outflow tienda naturalmente a cero al agotarse S.
-        d_stocks[suministro] = -consumo * stock / (stock + EPS_STOCK)
+        entrada = float(params.tasa_reabastecimiento_h.get(suministro, 0.0))
+        salida = 0.0
+        if suministro == "combustible_generadores":
+            # S/(S+eps) hace que el outflow tienda a cero al agotarse el stock.
+            salida = params.combustible_gal_h * n_operativas * stock / (stock + EPS_STOCK)
+        d_stocks[suministro] = entrada - salida
 
     instalaciones = {i.nombre: i for i in params.instalaciones}
     d_energia: dict[str, float] = {}
     for nombre in layout.instalaciones:
         energia = float(estado.energia[nombre])
         carga = sum(float(n) for n in cargas.get(nombre, {}).values())
+        if carga < 0:
+            raise ValueError("Las cargas deben ser no negativas")
         instalacion = instalaciones[nombre]
         capacidad = float(instalacion.camas + instalacion.uci)
-        # En el flujo normal una instalación con capacidad cero no recibe carga.
-        # Si llega una carga inconsistente, una capacidad efectiva mínima de 1
-        # evita la división por cero sin ocultar su efecto de agotamiento.
+        # Capacidad efectiva mínima de 1: evita la división por cero en una
+        # instalación sin camas sin ocultar el efecto de la carga.
         carga_relativa = carga / max(capacidad, 1.0)
         d_energia[nombre] = (
             -float(params.fatiga_alfa) * carga_relativa
@@ -162,18 +172,34 @@ def rk4(f: _FuncionVector, y: np.ndarray, dt: float) -> np.ndarray:
 
 def paso(
     estado: EstadoSD,
+    consumo_discreto: dict[str, float],
     cargas: dict[str, dict[str, int | float]],
     params: ParamsSistema,
     dt: float,
-    metodo: str = "rk4",
+    metodo: str = "euler",
 ) -> EstadoSD:
-    """Avanza un tick mediante Euler o RK4 y restablece invariantes físicos."""
+    """
+    Avanza un tick: primero aplica el impulso de R5, luego integra la parte
+    continua y por último restablece los invariantes físicos.
+    """
     if not np.isfinite(dt) or dt <= 0:
         raise ValueError("dt debe ser finito y positivo")
     if metodo not in {"euler", "rk4"}:
         raise ValueError("metodo debe ser 'euler' o 'rk4'")
 
     layout = _layout(params)
+
+    # 1. Impulso discreto: cantidad fija que el DES ya verificó y descontó.
+    stocks = dict(estado.stocks)
+    for suministro, cantidad in (consumo_discreto or {}).items():
+        if suministro not in stocks:
+            raise KeyError(f"consumo de un suministro desconocido: {suministro}")
+        stocks[suministro] -= float(cantidad)
+        assert stocks[suministro] >= -TOL_STOCK, (
+            f"stock negativo tras el impulso: {suministro}={stocks[suministro]:.6g}")
+    estado = EstadoSD(stocks=stocks, energia=dict(estado.energia))
+
+    # 2. Integración de la parte continua.
     vector = _a_vector(estado, layout)
 
     def f(y: np.ndarray) -> np.ndarray:
@@ -181,15 +207,26 @@ def paso(
         return _a_vector(derivadas(estado_intermedio, cargas, params), layout)
 
     actualizado = euler(f, vector, dt) if metodo == "euler" else rk4(f, vector, dt)
-    return _desde_vector(actualizado, layout, acotar=True)
+
+    # 3. Proyección de invariantes: stocks >= 0, energía en [0, 1].
+    resultado = _desde_vector(actualizado, layout, acotar=True)
+    for suministro, nivel in resultado.stocks.items():
+        assert nivel >= 0.0, f"stock negativo tras integrar: {suministro}={nivel:.6g}"
+    return resultado
 
 
-def factor_fatiga(energia_f: float) -> float:
-    """Multiplicador de servicio lineal: 1 con energía plena y 2 al agotarse."""
+def factor_fatiga(energia_f: float, factor_max: float | None = None) -> float:
+    """
+    S-7. Multiplicador del tiempo de servicio: 1 con energía plena y `factor_max`
+    al agotarse.
+    """
+    from .params import FATIGA_FACTOR_MAX
+
+    maximo = FATIGA_FACTOR_MAX if factor_max is None else float(factor_max)
     if not np.isfinite(energia_f):
         raise ValueError("energia_f debe ser finita")
     energia_acotada = float(np.clip(energia_f, 0.0, 1.0))
-    return 2.0 - energia_acotada
+    return 1.0 + (maximo - 1.0) * (1.0 - energia_acotada)
 
 
 def comparar_integradores(
