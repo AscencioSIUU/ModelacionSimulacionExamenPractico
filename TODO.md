@@ -80,14 +80,14 @@ escribiendo `plots.py` contra datos falsos desde el día 1.
 ## P3 — Sustrato SD
 
 ### `sd.py` (`paso()` con euler/rk4 y `comparar_integradores()` ya hechos)
-- [ ] `EstadoSD` — 7 stocks de suministros + `energia[instalacion]` ∈ [0,1] (ya stubbeado)
-- [ ] `derivadas(estado, cargas, params)`:
+- [x] `EstadoSD` — todos los stocks definidos en `params.suministros` + `energia[instalacion]` ∈ [0,1]
+- [x] `derivadas(estado, cargas, params)`:
   `dS_k/dt = -Σ_s params.coef_consumo[k][s] · N_s(t) · (S_k/(S_k+EPS_STOCK))` — se frena solo en 0
-- [ ] `dE_f/dt = -params.fatiga_alfa·(carga_f/cap_f) + params.fatiga_beta·(1−E_f)`
-- [ ] Adaptador vector↔dict para que `paso()` (que usa `np.ndarray`) opere sobre `EstadoSD`
-- [ ] `factor_fatiga(energia_f)` que `des.py` consume para alargar el servicio (p. ej. `2 − energia_f`)
-- [ ] Comentar en el código la relación con las diapositivas: EDO de 1er orden, Euler vs RK4, error de truncamiento
-- [ ] Test: `comparar_integradores()` — error de RK4 < error de Euler contra `e^{-tasa·t}`
+- [x] `dE_f/dt = -params.fatiga_alfa·(carga_f/cap_f) + params.fatiga_beta·(1−E_f)`
+- [x] Adaptador vector↔dict para que `paso()` (que usa `np.ndarray`) opere sobre `EstadoSD`
+- [x] `factor_fatiga(energia_f)` que `des.py` consume para alargar el servicio (p. ej. `2 − energia_f`)
+- [x] Comentar en el código la relación con las diapositivas: EDO de 1er orden, Euler vs RK4, error de truncamiento
+- [x] Test: `comparar_integradores()` — error de RK4 < error de Euler contra `e^{-tasa·t}`
 
 ---
 

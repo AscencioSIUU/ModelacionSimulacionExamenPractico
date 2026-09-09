@@ -14,7 +14,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ / "src"))
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-from hospital import des, intercambio, outputs, params, simulacion  # noqa: E402
+from hospital import des, intercambio, outputs, params, sd, simulacion  # noqa: E402
 
 
 # --------------------------------------------------------------------------- P1
@@ -168,6 +168,12 @@ def _p2_simulacion_llegadas_extra():
     res = simulacion.correr(p, seed=1000, llegadas_extra=lotes)
     base = simulacion.correr(p, seed=1000)
     assert res.generados == base.generados + sum(l.total for l in lotes)
+
+
+# --------------------------------------------------------------------------- P3
+def _p3_sd_integradores():
+    comparacion = sd.comparar_integradores()
+    assert comparacion["error_rk4"] < comparacion["error_euler"]
 
 
 # --------------------------------------------------------------------------- main
