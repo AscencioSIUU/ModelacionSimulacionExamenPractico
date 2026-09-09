@@ -1,0 +1,119 @@
+# TODO — Grupo 2, reparto de trabajo (equipo de 4)
+
+Modelo híbrido **DES (núcleo) + SD (acotado) + Monte Carlo**.
+Cada persona tiene **archivos exclusivos** en `src/hospital/` → nunca editan el
+mismo archivo → cero conflictos de merge.
+
+Los **contratos** (firmas de funciones, dataclasses, nombres de campos) ya están
+escritos en los stubs. Programen contra la firma: **nadie espera a nadie**.
+`params.py` ya está implementado y funcionando — es la base de todos.
+
+Cada persona agrega **su propio `assert`** en `tests/test_modelo.py`.
+Correr siempre antes de hacer push:  `uv run python tests/test_modelo.py`
+
+| Persona | Módulos propios | Tema |
+|---|---|---|
+| **P1** | `params.py` ✅, `intercambio.py`, `outputs.py` | Datos, intercambio Grupo 1, tablas para Grupo 7 |
+| **P2** | `des.py`, `simulacion.py` | Motor de eventos discretos + acoplamiento |
+| **P3** | `sd.py` | Stocks de suministros y fatiga, integradores Euler/RK4 |
+| **P4** | `montecarlo.py`, `plots.py`, `notebooks/Grupo2_SistemaHospitalario.ipynb` | 30 réplicas, IC 95 %, gráficas, notebook entregable |
+
+Orden sugerido: P1 y P3 pueden terminar ya (no dependen de nadie). P2 depende de
+las firmas de P1/P3 (ya existen). P4 arma el notebook al final pero puede ir
+escribiendo `plots.py` contra datos falsos desde el día 1.
+
+---
+
+## P1 — Datos, intercambio, salidas
+
+### `params.py` ✅ HECHO
+- [x] Dataclasses `Instalacion`, `ZonaHeridos`, `Suministro`, `ParamsSistema`
+- [x] Valores del Excel transcritos, tasas normalizadas a **base horaria** (`/24`)
+- [x] `matriz_ruteo()` — Z3 cerrada reparte a Z1/Z4; supuestos documentados en docstring
+- [x] `coef_consumo()` — reparte consumo/día por gravedad → unidades por paciente-hora
+- [x] `volcar_json()` → `data/processed/parametros.json`
+- [ ] **Revisar** los supuestos de `matriz_ruteo` y `PESO_CONSUMO_GRAVEDAD` con el equipo y anotarlos en `docs/` para el reporte
+
+### `intercambio.py`
+- [ ] `cargar_demanda_grupo1(path)` → `DataFrame | None` (ya stubbeado; validar columnas `COLS`)
+- [ ] `aplicar_demanda(params, demanda)` → estructura de llegadas adicionales por `(zona, bloque)` que `simulacion.correr` inyecta
+- [ ] Test: con el fixture `tests/fixtures/grupo1_demo.csv` devuelve 3 filas; con el CSV real vacío devuelve `None` sin reventar
+- [ ] **Bloqueado** el número final de muertes evitables hasta el intercambio presencial — dejar el código listo para solo cambiar el CSV
+
+### `outputs.py`
+- [ ] `tabla_saturacion(res_mc)` → `outputs/tables/saturacion_por_bloque.csv`: % ocupación de camas por instalación × bloque (media + IC95). **Es el output (a) para el Grupo 7.**
+- [ ] `tabla_cuellos_botella(res_mc)` → ranking de horas-recurso bloqueadas por tipo (cama UCI / cama general / médico / suministro). **Output (b) para el Grupo 7:** los 2 primeros de la lista.
+- [ ] `tabla_recursos_minimos(res_mc)` → barrido sobre +camas / +médicos / +sangre hasta que la mortalidad evitable baje de 15 %. **Output (c) para el Grupo 7.**
+- [ ] Las 3 funciones escriben CSV y devuelven el DataFrame (para el notebook)
+
+---
+
+## P2 — Motor DES + acoplamiento
+
+### `des.py` (calendario ya hecho: `Calendario`, `Evento`, `Paciente`, `Recursos`)
+- [ ] `llegadas_thinning(rng, params, zona, n_pool)` — Poisson **no homogéneo por thinning** (Lewis–Shedler): candidato `~Exp(LAMBDA_MAX·n_restante)`, aceptar con prob `lambda(t)/LAMBDA_MAX`. Comentar la fórmula de clase.
+- [ ] `puede_atender / tomar_recursos / liberar_recursos` según las reglas por gravedad:
+  grave → UCI + médico (+ quirófano); moderado → cama general + médico; leve → solo médico
+- [ ] Severidad de cada herido: multinomial con `ZonaHeridos.proporciones()`
+- [ ] Colas con prioridad `PRIORIDAD` (grave > moderado > leve), FIFO dentro del nivel
+- [ ] Tiempo de servicio: `Exp(1/T_ATENCION_H[g])` × factor_fatiga (de `sd`) × factor_escasez
+- [ ] Modo emergencia: pac/médico 4→8 al cruzar `params.umbral_emergencia`
+- [ ] `MUERTE_EN_COLA` agendada al encolar (`Exp(1/T_TOLERANCIA_COLA_H[g])`); cancelar si `INICIO_ATENCION` llega antes → **muerte evitable**
+- [ ] Mortalidad clínica al `FIN_ATENCION` con `P_MORTALIDAD_CLINICA[g]` → **muerte inevitable**
+- [ ] `Recursos.bloqueo_horas[(instalacion, recurso)]` — acumular horas que hubo cola con ese recurso a 0. **Alimenta directo la Pregunta 1.**
+
+### `simulacion.py` (dataclasses `Intervencion`, `ResultadoCorrida` ya hechas)
+- [ ] `correr(params, seed, intervencion=None) -> ResultadoCorrida`: bucle `while len(cal)`, despacho por `evento.tipo`
+- [ ] `FIN_BLOQUE` cada 6 h → snapshot: ocup_camas, ocup_uci, cola por gravedad, por instalación
+- [ ] `TICK_SD` cada `DT_SD=0.1` h → llamar `sd.paso` con las cargas actuales
+- [ ] **Acoplamiento DES→SD:** pacientes en atención = outflow de suministros + carga de fatiga
+- [ ] **Acoplamiento SD→DES:** suministro en 0 → bloquear el recurso ligado; energía baja → factor_fatiga > 1
+- [ ] Aplicar `Intervencion` (camas extra desde `desde_bloque`, médicos reasignados, derivar leves)
+- [ ] Invariante: `atendidos + muertes_evitables + muertes_clinicas + en_sistema == generados`
+
+---
+
+## P3 — Sustrato SD
+
+### `sd.py` (`paso()` con euler/rk4 y `comparar_integradores()` ya hechos)
+- [ ] `EstadoSD` — 7 stocks de suministros + `energia[instalacion]` ∈ [0,1] (ya stubbeado)
+- [ ] `derivadas(estado, cargas, params)`:
+  `dS_k/dt = -Σ_s params.coef_consumo[k][s] · N_s(t) · (S_k/(S_k+EPS_STOCK))` — se frena solo en 0
+- [ ] `dE_f/dt = -params.fatiga_alfa·(carga_f/cap_f) + params.fatiga_beta·(1−E_f)`
+- [ ] Adaptador vector↔dict para que `paso()` (que usa `np.ndarray`) opere sobre `EstadoSD`
+- [ ] `factor_fatiga(energia_f)` que `des.py` consume para alargar el servicio (p. ej. `2 − energia_f`)
+- [ ] Comentar en el código la relación con las diapositivas: EDO de 1er orden, Euler vs RK4, error de truncamiento
+- [ ] Test: `comparar_integradores()` — error de RK4 < error de Euler contra `e^{-tasa·t}`
+
+---
+
+## P4 — Monte Carlo, gráficas, notebook
+
+### `montecarlo.py`
+- [ ] `correr_replicas(params, n=30, intervencion=None)` — seeds `np.random.default_rng(1000+r)`, llama `simulacion.correr`
+- [ ] Perturbaciones por réplica: heridos iniciales (±%), multiplicador de `lambda`, multiplicador de tiempos de servicio, presentismo del personal (~85 %), tasas de mortalidad
+- [ ] Agregación: media + **IC 95 % por percentiles 2.5 / 97.5** (los tiempos de colapso son sesgados, no usar ±1.96σ)
+- [ ] `bloque_de_colapso(res_mc)` por instalación = primer bloque con ocupación ≈100 % y cola creciente sostenida → **respuesta Pregunta 1**
+- [ ] `muertes_evitables_vs_base(res_base, res_g1)` en las primeras 48 h (8 bloques) → **respuesta Pregunta 2** *(bloqueado hasta el intercambio)*
+- [ ] `recurso_cuello_botella(res_mc)` = argmax de `bloqueo_horas` agregado
+
+### `plots.py`
+- [ ] `serie_con_banda(ax, t, media, lo, hi, label)` — helper base de todas las gráficas
+- [ ] Ocupación de camas/UCI por instalación con banda IC95 (la gráfica clave del video)
+- [ ] Barras: ranking de cuellos de botella
+- [ ] Euler vs RK4 (usa `sd.comparar_integradores`)
+- [ ] Base vs escenario Grupo 1 *(cuando haya datos)*
+- [ ] Todas guardan PNG en `outputs/figures/`
+
+### `notebooks/Grupo2_SistemaHospitalario.ipynb`  ← ENTREGABLE CANVAS
+- [ ] ~15 celdas, **solo importa de `src.hospital` y grafica** — nada de lógica de modelo en el notebook
+- [ ] Narrativa = estructura del reporte: paradigma → ODD → resultados (Pregunta 1) → intercambio (Pregunta 2) → limitaciones
+- [ ] Celdas comentadas explicando la relación código ↔ fórmulas (EDO, RK4, thinning, matriz de flujo)
+- [ ] Última celda: genera los 3 CSV de `outputs.py` para el Grupo 7
+
+---
+
+## Cuando llegue el intercambio presencial
+1. Pegar los datos del Grupo 1 en `data/intercambio/grupo1_demanda.csv`
+2. Re-ejecutar el notebook completo
+3. **Cero cambios de código.** Solo se recalculan Pregunta 2 y las gráficas base-vs-G1

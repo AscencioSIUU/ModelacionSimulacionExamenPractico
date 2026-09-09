@@ -1,6 +1,7 @@
-# Todos los .md excepto README (pedido explícito). docs/ queda fuera de git.
+# Todos los .md excepto README y TODO (pedido explícito). docs/ queda fuera de git.
 *.md
 !README.md
+!TODO.md
 
 # Python
 __pycache__/
@@ -9,5 +10,6 @@ __pycache__/
 .ipynb_checkpoints/
 .python-version
 
-# Reporte final (se genera aparte)
+# Generados
+data/processed/
 docs/reporte.pdf
