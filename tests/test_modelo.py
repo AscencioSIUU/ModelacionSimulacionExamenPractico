@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
-from dataclasses import replace
+from dataclasses import fields as dataclasses_fields, replace
 from pathlib import Path
 
 import matplotlib
@@ -132,6 +132,39 @@ def _p1_intercambio_fixture():
     z5 = imp.loc[imp["zona"] == "Z5"].iloc[0]
     assert z5["grupo1_total"] == 320
     assert z5["nuevo_total"] == 4570 + 320
+
+
+def _p1_aplicar_demanda_sub_lotes():
+    """El conteo de cada bloque se puede repartir dentro de sus 6 h sin perder heridos."""
+    p = params.cargar()
+    df = intercambio.cargar_demanda_grupo1(FIXTURES / "grupo1_demo.csv")
+
+    uno = intercambio.aplicar_demanda(p, df, sub_lotes=1)
+    seis = intercambio.aplicar_demanda(p, df, sub_lotes=6)
+
+    assert [l.t for l in uno] == [6.0, 12.0, 18.0]                # sin repartir, al inicio
+    assert sum(l.total for l in seis) == sum(l.total for l in uno)  # se conserva el total
+    assert len(seis) == 3 * 6                                     # 3 filas x 6 sub-lotes
+    assert all(l.total > 0 for l in seis)                         # sin lotes vacíos
+    assert [l.t for l in seis] == sorted(l.t for l in seis)       # ordenados por tiempo
+
+    paso = params.BLOQUE_H / 6
+    for fila in df.itertuples(index=False):
+        inicio = (int(fila.bloque) - 1) * params.BLOQUE_H
+        de_esta_fila = [l for l in seis if l.zona == fila.zona
+                        and inicio <= l.t < inicio + params.BLOQUE_H]
+        assert len(de_esta_fila) == 6                             # cae dentro de su bloque
+        assert [l.t for l in de_esta_fila] == [inicio + k * paso for k in range(6)]
+        for gravedad, columna in (("leve", "heridos_leves"), ("moderado", "heridos_moderados"),
+                                  ("grave", "heridos_graves")):
+            esperado = int(getattr(fila, columna))
+            assert sum(getattr(l, gravedad) for l in de_esta_fila) == esperado
+
+    try:
+        intercambio.aplicar_demanda(p, df, sub_lotes=0)
+        raise AssertionError("sub_lotes=0 debería fallar")
+    except ValueError:
+        pass
 
 
 # --------------------------------------------------------------------------- P2
@@ -407,6 +440,8 @@ def _fake_res_mc(n_rep=30, seed=0) -> outputs.ResultadoMC:
         muertes_evitables=rng.integers(200, 900, n_rep).astype(float),
         muertes_clinicas=rng.integers(100, 400, n_rep).astype(float),
         generados=np.full(n_rep, 11773.0),
+        muertes_evitables_bloque=rng.integers(0, 90, (n_rep, nb)).astype(float),
+        muertes_clinicas_bloque=rng.integers(0, 40, (n_rep, nb)).astype(float),
     )
 
 
@@ -598,6 +633,104 @@ def _p4_plots_png():
     plots.ocupacion_por_bloque(bloques, "medico", ax=ax)
     assert len(list(plots.DIR_FIGURAS.iterdir())) == antes        # con `ax` no escribe archivo
     plt.close("all")
+
+
+def _p4_llegadas_extra_en_montecarlo():
+    """La demanda del Grupo 1 llega hasta Monte Carlo, no solo a una corrida suelta."""
+    p = _mini()
+    demanda = intercambio.cargar_demanda_grupo1(FIXTURES / "grupo1_demo.csv")
+    lotes = intercambio.aplicar_demanda(p, demanda)
+    seeds = montecarlo.semillas(4)
+
+    base = montecarlo.correr_replicas(p, n=4, procesos=1, guardar_logs=False,
+                                      semillas_fijas=seeds)
+    con_g1 = montecarlo.correr_replicas(p, n=4, procesos=1, guardar_logs=False,
+                                        semillas_fijas=seeds, llegadas_extra=lotes)
+    adicionales = sum(l.total for l in lotes)
+    assert np.all(con_g1.generados == base.generados + adicionales)
+    assert base.metadatos["con_grupo1"] is False
+    assert con_g1.metadatos["con_grupo1"] is True
+
+
+def _p4_muertes_evitables_hasta():
+    res = _fake_res_mc(n_rep=6)
+    a_48 = montecarlo.muertes_evitables_hasta(res, 48.0)
+    assert np.allclose(a_48, res.muertes_evitables_bloque[:, :8].sum(axis=1))
+    a_72 = montecarlo.muertes_evitables_hasta(res, params.HORIZONTE_H)
+    assert np.all(a_48 <= a_72)                                   # acumulado, no puede bajar
+
+    # las muertes por bloque salen de los mismos arrays, sin depender de los logs
+    por_bloque = montecarlo.muertes_por_bloque(res, acumulado=True)
+    evitables = por_bloque[por_bloque["tipo"] == "evitable"].sort_values("bloque")
+    assert abs(evitables["muertes_media"].iloc[7] - a_48.mean()) < 1e-9
+
+
+def _p4_comparar_con_grupo1():
+    """Pregunta 2: muertes evitables adicionales en las primeras 48 h."""
+    p = _mini()
+    demanda = intercambio.cargar_demanda_grupo1(FIXTURES / "grupo1_demo.csv")
+    lotes = intercambio.aplicar_demanda(p, demanda)
+    seeds = montecarlo.semillas(4)
+    base = montecarlo.correr_replicas(p, n=4, procesos=1, guardar_logs=False,
+                                      semillas_fijas=seeds)
+    con_g1 = montecarlo.correr_replicas(p, n=4, procesos=1, guardar_logs=False,
+                                        semillas_fijas=seeds, llegadas_extra=lotes)
+
+    df = montecarlo.comparar_con_grupo1(base, con_g1, horas=48.0)
+    assert list(df["ventana"]) == ["primeras 48 h", f"{params.HORIZONTE_H} h completas"]
+    fila = df.iloc[0]
+    assert fila["adicionales_media"] == fila["con_grupo1_media"] - fila["base_media"]
+    assert fila["adicionales_ic95_bajo"] <= fila["adicionales_media"] <= fila["adicionales_ic95_alto"]
+    assert (df["n_replicas"] == 4).all()
+
+    distintas = montecarlo.correr_replicas(p, n=4, procesos=1, guardar_logs=False,
+                                           semillas_fijas=montecarlo.semillas(4, base=99))
+    try:
+        montecarlo.comparar_con_grupo1(base, distintas)
+        raise AssertionError("debería exigir semillas compartidas")
+    except ValueError:
+        pass
+
+
+def _p4_sensibilidad_sobre_grupo1():
+    """Las intervenciones de la Pregunta 2 se evalúan sobre el escenario con Grupo 1."""
+    p = _mini()
+    demanda = intercambio.cargar_demanda_grupo1(FIXTURES / "grupo1_demo.csv")
+    lotes = intercambio.aplicar_demanda(p, demanda)
+    df = montecarlo.sensibilidad_recursos(
+        p, n=4, delta=0.20, recursos=("camas", "medicos"), procesos=2,
+        llegadas_extra=lotes, metrica="muertes_evitables_48h")
+    assert (df["metrica"] == "muertes_evitables_48h").all()
+    assert df[df["recurso"] == "camas"].iloc[0]["dif_pareada_media"] == 0.0   # no vinculan
+    assert "determinante" in df.columns
+
+
+def _p4_cache_tolera_contrato_viejo():
+    """Un cache escrito con otro contrato se recalcula, no revienta el cuaderno."""
+    dir_cache = Path(tempfile.mkdtemp())
+    llamadas = []
+
+    def calcular():
+        llamadas.append(1)
+        return {"valor": 42}
+
+    primero = montecarlo.cargar_o_correr("demo", calcular, dir_cache=dir_cache, firma=1)
+    segundo = montecarlo.cargar_o_correr("demo", calcular, dir_cache=dir_cache, firma=1)
+    assert primero == segundo == {"valor": 42}
+    assert len(llamadas) == 1                                     # el segundo salió del cache
+
+    montecarlo.cargar_o_correr("demo", calcular, dir_cache=dir_cache, firma=2)
+    assert len(llamadas) == 2                                     # otra firma, otra clave
+
+    # la firma del esquema de ResultadoMC entra en la clave del cache
+    assert montecarlo._ESQUEMA_MC == tuple(f.name for f in dataclasses_fields(outputs.ResultadoMC))
+    assert "muertes_evitables_bloque" in montecarlo._ESQUEMA_MC
+
+    for archivo in dir_cache.glob("demo_*.pkl"):          # ambas firmas, para dar con la de 1
+        archivo.write_bytes(b"esto no es un pickle valido")
+    assert montecarlo.cargar_o_correr("demo", calcular, dir_cache=dir_cache,
+                                      firma=1) == {"valor": 42}
+    assert len(llamadas) == 3                                     # cache ilegible -> recalcula
 
 
 # --------------------------------------------------------------------------- main

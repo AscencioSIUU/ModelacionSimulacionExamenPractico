@@ -48,6 +48,10 @@ class ResultadoMC:
     muertes_evitables: np.ndarray          # [r]
     muertes_clinicas: np.ndarray           # [r]
     generados: np.ndarray                  # [r]
+    # Muertes por bloque de 6 h. Se guardan aparte del patient_log para poder
+    # medir ventanas de tiempo (p. ej. las primeras 48 h) sin arrastrar los logs.
+    muertes_evitables_bloque: np.ndarray   # [r, b]
+    muertes_clinicas_bloque: np.ndarray    # [r, b]
     patient_log: pd.DataFrame = field(default_factory=pd.DataFrame)
     state_log: pd.DataFrame = field(default_factory=pd.DataFrame)
     stock_log: pd.DataFrame = field(default_factory=pd.DataFrame)

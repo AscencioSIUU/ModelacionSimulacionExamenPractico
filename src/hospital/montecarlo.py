@@ -11,7 +11,7 @@ import hashlib
 import os
 import pickle
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Callable, NamedTuple, Sequence, TypeVar
 
@@ -94,6 +94,7 @@ class _Tarea(NamedTuple):
     intervencion: Intervencion | None
     perturbar_params: bool
     guardar_logs: bool
+    llegadas_extra: tuple | None
 
 
 class _Salida(NamedTuple):
@@ -106,6 +107,8 @@ class _Salida(NamedTuple):
     bloqueo_horas: np.ndarray       # [i, k]
     muertes_evitables: int
     muertes_clinicas: int
+    muertes_evitables_bloque: np.ndarray    # [b]
+    muertes_clinicas_bloque: np.ndarray     # [b]
     atendidos: int
     generados: int
     patient_log: pd.DataFrame
@@ -139,6 +142,16 @@ def _ocupacion_media_por_bloque(state_log: pd.DataFrame, instalaciones: Sequence
     return tabla.to_numpy(dtype=float, na_value=0.0)
 
 
+def _muertes_por_bloque_replica(patient_log: pd.DataFrame, estado: str) -> np.ndarray:
+    """Muertes de un tipo en cada bloque de 6 h, para una sola réplica."""
+    conteo = np.zeros(N_BLOQUES)
+    sub = patient_log[patient_log["estado"] == estado].dropna(subset=["t_fin"])
+    if not sub.empty:
+        for bloque, n in pd.Series(_bloque_de(sub["t_fin"])).value_counts().items():
+            conteo[int(bloque) - 1] = n
+    return conteo
+
+
 def _corrida(tarea: _Tarea) -> _Salida:
     semilla_pert, semilla_sim = np.random.SeedSequence(tarea.seed).spawn(2)
     p = tarea.params
@@ -146,7 +159,9 @@ def _corrida(tarea: _Tarea) -> _Salida:
         p = perturbar(p, P.make_rng(int(semilla_pert.generate_state(1)[0])))
 
     res = simulacion.correr(p, seed=int(semilla_sim.generate_state(1)[0]),
-                            intervencion=tarea.intervencion, replica=tarea.replica)
+                            intervencion=tarea.intervencion,
+                            llegadas_extra=list(tarea.llegadas_extra or ()),
+                            replica=tarea.replica)
 
     ocupaciones = {r: _ocupacion_media_por_bloque(res.state_log, res.instalaciones, r)
                    for r in _RECURSO_DE_OCUPACION}
@@ -161,6 +176,8 @@ def _corrida(tarea: _Tarea) -> _Salida:
         bloqueo_horas=res.bloqueo_horas,
         muertes_evitables=res.muertes_evitables,
         muertes_clinicas=res.muertes_clinicas,
+        muertes_evitables_bloque=_muertes_por_bloque_replica(res.patient_log, "muerte_evitable"),
+        muertes_clinicas_bloque=_muertes_por_bloque_replica(res.patient_log, "muerte_clinica"),
         atendidos=res.atendidos,
         generados=res.generados,
         patient_log=res.patient_log if tarea.guardar_logs else vacio,
@@ -179,16 +196,22 @@ def correr_replicas(
     perturbar_params: bool = True,
     guardar_logs: bool = True,
     semillas_fijas: Sequence[int] | None = None,
+    llegadas_extra: Sequence | None = None,
 ) -> ResultadoMC:
     """
     Corre `n` réplicas independientes y las apila en un `ResultadoMC`.
+
+    `llegadas_extra` son los lotes que devuelve `intercambio.aplicar_demanda`: con
+    ellos el escenario incluye la demanda del Grupo 1; sin ellos es el escenario
+    base que el grupo proyectó antes del intercambio.
     """
     if n < 1:
         raise ValueError("n debe ser al menos 1")
     seeds = list(semillas_fijas) if semillas_fijas is not None else semillas(n)
     if len(seeds) < n:
         raise ValueError("semillas_fijas tiene menos elementos que réplicas")
-    tareas = [_Tarea(r, p, seeds[r], intervencion, perturbar_params, guardar_logs)
+    extra = tuple(llegadas_extra) if llegadas_extra else None
+    tareas = [_Tarea(r, p, seeds[r], intervencion, perturbar_params, guardar_logs, extra)
               for r in range(n)]
 
     if procesos is None:
@@ -222,12 +245,14 @@ def correr_replicas(
         muertes_evitables=np.array([s.muertes_evitables for s in salidas], dtype=float),
         muertes_clinicas=np.array([s.muertes_clinicas for s in salidas], dtype=float),
         generados=np.array([s.generados for s in salidas], dtype=float),
+        muertes_evitables_bloque=apilar("muertes_evitables_bloque"),
+        muertes_clinicas_bloque=apilar("muertes_clinicas_bloque"),
         patient_log=concatenar("patient_log"),
         state_log=concatenar("state_log"),
         stock_log=concatenar("stock_log"),
         metadatos={"etiqueta": etiqueta, "n": n, "semillas": seeds[:n],
                    "intervencion": intervencion, "perturbado": perturbar_params,
-                   "metodo_ic": "t", "procesos": procesos,
+                   "con_grupo1": extra is not None, "metodo_ic": "t", "procesos": procesos,
                    "atendidos": [s.atendidos for s in salidas]},
     )
 
@@ -303,25 +328,24 @@ def stocks_en_tiempo(res: ResultadoMC, metodo_ic: str = "t") -> pd.DataFrame:
 def muertes_por_bloque(res: ResultadoMC, acumulado: bool = True,
                        metodo_ic: str = "t") -> pd.DataFrame:
     """Muertes evitables y clínicas por bloque de 6 h, con IC 95 %."""
-    if res.patient_log.empty:
-        raise ValueError("muertes_por_bloque necesita patient_log")
-    log = res.patient_log
     filas = []
-    for tipo, estado in (("evitable", "muerte_evitable"), ("clinica", "muerte_clinica")):
-        sub = log[log["estado"] == estado].dropna(subset=["t_fin"]).copy()
-        conteo = np.zeros((res.n_replicas, N_BLOQUES))
-        if not sub.empty:
-            sub["bloque"] = _bloque_de(sub["t_fin"])
-            for (r, b), g in sub.groupby(["replica", "bloque"]):
-                conteo[int(r), int(b) - 1] = len(g)
-        if acumulado:
-            conteo = np.cumsum(conteo, axis=1)
+    for tipo, arr in (("evitable", res.muertes_evitables_bloque),
+                      ("clinica", res.muertes_clinicas_bloque)):
+        conteo = np.cumsum(arr, axis=1) if acumulado else np.asarray(arr, dtype=float)
         media, lo, hi = ic95(conteo, axis=0, metodo=metodo_ic)
         for b in range(N_BLOQUES):
             filas.append({"bloque": b + 1, "tipo": tipo, "muertes_media": float(media[b]),
                           "ic95_bajo": float(lo[b]), "ic95_alto": float(hi[b]),
                           "acumulado": acumulado})
     return pd.DataFrame(filas)
+
+
+def muertes_evitables_hasta(res: ResultadoMC, horas: float = 48.0) -> np.ndarray:
+    """Muertes evitables acumuladas por réplica dentro de las primeras `horas`."""
+    bloques = int(round(horas / BLOQUE_H))
+    if not 1 <= bloques <= N_BLOQUES:
+        raise ValueError(f"horas debe caer dentro del horizonte de {HORIZONTE_H} h")
+    return res.muertes_evitables_bloque[:, :bloques].sum(axis=1)
 
 
 def _metrica(res: ResultadoMC, nombre: str) -> np.ndarray:
@@ -453,6 +477,15 @@ def _palanca(recurso: str, p: ParamsSistema, delta: float) -> Intervencion:
     raise KeyError(f"recurso de sensibilidad desconocido: {recurso}")
 
 
+def _objetivo(res: ResultadoMC, metrica: str) -> np.ndarray:
+    """Vector por réplica de la métrica que la sensibilidad busca reducir."""
+    if metrica == "muertes_evitables":
+        return res.muertes_evitables
+    if metrica == "muertes_evitables_48h":
+        return muertes_evitables_hasta(res, 48.0)
+    raise KeyError(f"métrica de sensibilidad desconocida: {metrica}")
+
+
 def sensibilidad_recursos(
     p: ParamsSistema,
     n: int = 30,
@@ -460,6 +493,8 @@ def sensibilidad_recursos(
     procesos: int | None = None,
     recursos: Sequence[str] = RECURSOS_SENSIBILIDAD,
     res_base: ResultadoMC | None = None,
+    llegadas_extra: Sequence | None = None,
+    metrica: str = "muertes_evitables",
 ) -> pd.DataFrame:
     """
     Relaja cada recurso por separado en `delta` y mide el efecto sobre la
@@ -468,15 +503,24 @@ def sensibilidad_recursos(
 
     La comparación es pareada réplica a réplica: `determinante` marca el recurso
     con mayor reducción entre los que tienen un IC pareado que excluye el 0.
+
+    Para la Pregunta 2 se pasa `llegadas_extra` con la demanda del Grupo 1 y
+    `metrica="muertes_evitables_48h"`: así se mide qué intervención recorta más
+    las muertes evitables de las primeras 48 h del escenario con desplazados.
     """
     seeds = semillas(n)
-    if res_base is None or res_base.n_replicas != n or res_base.metadatos.get("semillas") != seeds:
+    mismo_escenario = (res_base is not None
+                       and res_base.n_replicas == n
+                       and res_base.metadatos.get("semillas") == seeds
+                       and res_base.metadatos.get("con_grupo1", False) == bool(llegadas_extra))
+    if not mismo_escenario:
         res_base = correr_replicas(p, n=n, procesos=procesos, etiqueta="base",
-                                   guardar_logs=False, semillas_fijas=seeds)
-    base = res_base.muertes_evitables
+                                   guardar_logs=False, semillas_fijas=seeds,
+                                   llegadas_extra=llegadas_extra)
+    base = _objetivo(res_base, metrica)
 
     filas = [{"escenario": "base", "recurso": "— base —", "delta": 0.0, "n": n,
-              "palanca": "", "muertes_evitables_media": float(np.mean(base)),
+              "metrica": metrica, "palanca": "", "muertes_evitables_media": float(np.mean(base)),
               "ic95_bajo": float(ic95(base)[1]), "ic95_alto": float(ic95(base)[2]),
               "tasa_evitable_media": float(np.mean(res_base.tasa_evitable)),
               "dif_pareada_media": 0.0, "dif_ic95_bajo": 0.0, "dif_ic95_alto": 0.0,
@@ -486,13 +530,15 @@ def sensibilidad_recursos(
         interv = _palanca(recurso, p, delta)
         res = correr_replicas(p, n=n, intervencion=interv, procesos=procesos,
                               etiqueta=f"+{int(delta * 100)}% {recurso}",
-                              guardar_logs=False, semillas_fijas=seeds)
-        dif = base - res.muertes_evitables            # positivo = muertes evitadas
+                              guardar_logs=False, semillas_fijas=seeds,
+                              llegadas_extra=llegadas_extra)
+        objetivo = _objetivo(res, metrica)
+        dif = base - objetivo                         # positivo = muertes evitadas
         d_media, d_lo, d_hi = ic95(dif)
-        m, lo, hi = ic95(res.muertes_evitables)
+        m, lo, hi = ic95(objetivo)
         filas.append({
             "escenario": f"+{int(delta * 100)}% {recurso}", "recurso": recurso,
-            "delta": delta, "n": n, "palanca": str(interv),
+            "delta": delta, "n": n, "metrica": metrica, "palanca": str(interv),
             "muertes_evitables_media": float(m), "ic95_bajo": float(lo), "ic95_alto": float(hi),
             "tasa_evitable_media": float(np.mean(res.tasa_evitable)),
             "dif_pareada_media": float(d_media), "dif_ic95_bajo": float(d_lo),
@@ -509,21 +555,79 @@ def sensibilidad_recursos(
 
 
 # =============================================================================
+# Pregunta 2 — intercambio con el Grupo 1
+# =============================================================================
+def comparar_con_grupo1(res_base: ResultadoMC, res_grupo1: ResultadoMC,
+                        horas: float = 48.0, metodo_ic: str = "t") -> pd.DataFrame:
+    """
+    Muertes evitables adicionales que provoca la demanda del Grupo 1.
+
+    `res_base` es el escenario que el grupo proyectó antes del intercambio y
+    `res_grupo1` el mismo escenario con los desplazados inyectados. Ambos deben
+    haberse corrido con las mismas semillas: la comparación es pareada réplica a
+    réplica, que es lo que permite medir la diferencia con 30 corridas.
+    """
+    if res_base.n_replicas != res_grupo1.n_replicas:
+        raise ValueError("ambos escenarios deben tener el mismo número de réplicas")
+    if res_base.metadatos.get("semillas") != res_grupo1.metadatos.get("semillas"):
+        raise ValueError("los escenarios no comparten semillas: la comparación no sería pareada")
+
+    filas = []
+    ventanas = ((f"primeras {horas:.0f} h", muertes_evitables_hasta(res_base, horas),
+                 muertes_evitables_hasta(res_grupo1, horas)),
+                (f"{HORIZONTE_H} h completas", res_base.muertes_evitables,
+                 res_grupo1.muertes_evitables))
+    for ventana, base, con_g1 in ventanas:
+        dif = con_g1 - base                          # positivo = muertes adicionales
+        d_media, d_lo, d_hi = ic95(dif, metodo=metodo_ic)
+        b_media, b_lo, b_hi = ic95(base, metodo=metodo_ic)
+        g_media, g_lo, g_hi = ic95(con_g1, metodo=metodo_ic)
+        filas.append({
+            "ventana": ventana, "n_replicas": res_base.n_replicas,
+            "base_media": float(b_media), "base_ic95_bajo": float(b_lo),
+            "base_ic95_alto": float(b_hi),
+            "con_grupo1_media": float(g_media), "con_grupo1_ic95_bajo": float(g_lo),
+            "con_grupo1_ic95_alto": float(g_hi),
+            "adicionales_media": float(d_media), "adicionales_ic95_bajo": float(d_lo),
+            "adicionales_ic95_alto": float(d_hi),
+            "incremento_pct": float(100 * d_media / b_media) if b_media else float("nan"),
+            "metodo_ic": metodo_ic,
+        })
+    return pd.DataFrame(filas)
+
+
+# =============================================================================
 # Cache en disco
 # =============================================================================
+# Firma del contrato de salida. Entra en la clave del cache para que un cambio de
+# campos en `ResultadoMC` invalide los archivos viejos en vez de devolver objetos
+# incompletos que reventarían más adelante.
+_ESQUEMA_MC = tuple(f.name for f in fields(ResultadoMC))
+
+# Un pickle escrito con otra versión del código puede fallar de varias formas al
+# leerse.
+_ERRORES_DE_CACHE = (pickle.UnpicklingError, AttributeError, EOFError, ImportError,
+                     ModuleNotFoundError, TypeError, ValueError)
+
+
 def cargar_o_correr(clave: str, fn: Callable[[], T], usar_cache: bool = True,
                     dir_cache: Path = DIR_CACHE, firma: object = None) -> T:
     """
     Devuelve el resultado cacheado de `fn` o lo calcula y lo guarda.
 
     Las semillas son deterministas, así que el resultado es idéntico con o sin
-    cache: borrar `outputs/cache/` solo hace que el cuaderno tarde más.
+    cache: borrar `outputs/cache/` solo hace que el cuaderno tarde más. Si el
+    archivo cacheado quedó ilegible o lo escribió una versión anterior del
+    contrato, se recalcula en silencio.
     """
-    sha = hashlib.sha1(repr((clave, firma)).encode()).hexdigest()[:12]
+    sha = hashlib.sha1(repr((clave, firma, _ESQUEMA_MC)).encode()).hexdigest()[:12]
     ruta = Path(dir_cache) / f"{clave}_{sha}.pkl"
     if usar_cache and ruta.exists():
-        with ruta.open("rb") as f:
-            return pickle.load(f)
+        try:
+            with ruta.open("rb") as f:
+                return pickle.load(f)
+        except _ERRORES_DE_CACHE:
+            ruta.unlink(missing_ok=True)
     resultado = fn()
     ruta.parent.mkdir(parents=True, exist_ok=True)
     with ruta.open("wb") as f:

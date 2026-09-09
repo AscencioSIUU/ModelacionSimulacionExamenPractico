@@ -60,26 +60,50 @@ class LlegadaExtra:
         return self.leve + self.moderado + self.grave
 
 
-def aplicar_demanda(params: ParamsSistema, demanda: pd.DataFrame) -> list[LlegadaExtra]:
+def _reparto_por_mayor_resto(total: int, partes: int) -> list[int]:
+    """Divide `total` en `partes` enteros que suman exactamente `total`."""
+    base, sobra = divmod(total, partes)
+    return [base + (1 if i < sobra else 0) for i in range(partes)]
+
+
+def aplicar_demanda(params: ParamsSistema, demanda: pd.DataFrame,
+                    sub_lotes: int = 1) -> list[LlegadaExtra]:
     """
     Traduce la tabla del Grupo 1 en lotes de llegadas adicionales ordenados por
     tiempo.
+
+    La tabla da un conteo por zona y bloque de 6 h. `sub_lotes` decide cómo se
+    reparte ese conteo dentro de su bloque:
+
+    - `1` (por omisión): todo el lote entra en el instante inicial del bloque.
+    - `n > 1`: el lote se divide en `n` llegadas espaciadas `BLOQUE_H / n` horas,
+      lo que evita concentrar en un solo instante la demanda de seis horas.
+    
+    El reparto es por mayor resto sobre cada gravedad, así que el total de
+    heridos se conserva exactamente. Los lotes de total cero se descartan.
 
     `params` se recibe para futuras reglas dependientes de la zona (p. ej. tope
     por capacidad de ruteo).
     """
     _ = params  # reservado para reglas por zona
+    if sub_lotes < 1:
+        raise ValueError("sub_lotes debe ser al menos 1")
+
+    paso = BLOQUE_H / sub_lotes
     lotes: list[LlegadaExtra] = []
     for r in demanda.itertuples(index=False):
-        t = (int(r.bloque) - 1) * BLOQUE_H
-        lote = LlegadaExtra(
-            zona=r.zona, t=float(t),
-            leve=int(r.heridos_leves),
-            moderado=int(r.heridos_moderados),
-            grave=int(r.heridos_graves),
-        )
-        if lote.total > 0:
-            lotes.append(lote)
+        t_bloque = (int(r.bloque) - 1) * BLOQUE_H
+        reparto = {g: _reparto_por_mayor_resto(int(getattr(r, _COL_GRAVEDAD[g])), sub_lotes)
+                   for g in GRAVEDADES}
+        for k in range(sub_lotes):
+            lote = LlegadaExtra(
+                zona=r.zona, t=float(t_bloque + k * paso),
+                leve=reparto["leve"][k],
+                moderado=reparto["moderado"][k],
+                grave=reparto["grave"][k],
+            )
+            if lote.total > 0:
+                lotes.append(lote)
     lotes.sort(key=lambda x: (x.t, x.zona))
     return lotes
 
