@@ -1,7 +1,7 @@
-# Todos los .md excepto README y TODO (pedido explícito). docs/ queda fuera de git.
+# Todos los .md excepto README y REPORTE-GRUPO7.md.
 *.md
 !README.md
-!TODO.md
+!docs/REPORTE-GRUPO7.md
 
 # Python
 __pycache__/
@@ -13,5 +13,5 @@ __pycache__/
 # Generados (regenerables desde el notebook)
 data/processed/
 outputs/tables/*.csv
+outputs/cache/
 outputs/figures/*.png
-docs/reporte.pdf
